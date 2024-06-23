@@ -14,6 +14,8 @@ import (
 	"crypto/dsa"
 )
 
+// _____ STRUCTS _____
+
 type User struct {
 	Username   string
 	PrivateKey *rsa.PrivateKey
@@ -21,7 +23,26 @@ type User struct {
 	RootKey    []byte
 }
 
+type UserKeys struct {
+	PrivateKey *rsa.PrivateKey
+	DSSignKey  *dsa.PrivateKey
+}
+
+type Salt struct {
+	Username string
+	Salt,
+	HashedPassword []byte
+}
+
+type SecureData struct {
+	EncContent,
+	Tag []byte
+}
+
+// _____ FUNCTIONS _____
+
 func InitUser(username string, password string) (userdataptr *User, err error) {
+	
 	
 	return nil, nil
 }
