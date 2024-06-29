@@ -9,9 +9,8 @@ import (
 	"crypto/hmac"
 	"golang.org/x/crypto/argon2"
 
-	"fmt"
-	"log"
 	"encoding/json"
+	"errors"
 	
 	"github.com/google/uuid"
 	"github.com/dgraph-io/badger/v3"
@@ -47,6 +46,7 @@ type SecureData struct {
 // _____ CONSTANTS _____
 const KEY_LENGTH = 256
 const SALT_PURPOSE_STRING = "SALT_PURPOSE_STRING"
+const DB_PATH = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem"
 
 // _____ HELPER FUNCTIONS _____
 func uuidFromBytes(key []byte, purpose string) (uuid.UUID, error) {
@@ -131,15 +131,57 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 		return nil, err
 	}
 
+	saltStructUUID, err := uuidFromStrings(username, SALT_PURPOSE_STRING)
+	if (err != nil) {
+		return nil, err
+	}
 
+	db, err := badger.Open(badger.DefaultOptions(DB_PATH))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
 	
-
+	saltStructUUIDString := saltStructUUID.String()
+	err = storeData(db, saltStructUUIDString, serializedSaltStruct)
+	if err != nil {
+		return nil, err
+	}
+	
 	return nil, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
+	saltStructUUID, err := uuidFromStrings(username, SALT_PURPOSE_STRING)
+	if err != nil {
+		return nil, err
+	}
+	saltStructUUIDString := saltStructUUID.String()
 
-	return nil, nil
+	db, err := badger.Open(badger.DefaultOptions(DB_PATH))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	serializedSaltStruct, err := getData(db, saltStructUUIDString)
+	if err != nil {
+		return nil, err
+	}
+
+	var saltStruct Salt
+	err = json.Unmarshal(serializedSaltStruct, &saltStruct)
+	if err != nil {
+		return nil, err
+	}
+
+	if !verifyPassword(saltStruct.HashedPassword, saltStruct.Salt, password) {
+		return nil, errors.New("Invalid Credentials")
+	}
+
+	userStruct := User{username, nil, nil, nil}
+
+	return &userStruct, nil
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
