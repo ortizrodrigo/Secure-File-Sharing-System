@@ -6,6 +6,7 @@ import (
 	"crypto/dsa"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/subtle"
     "golang.org/x/crypto/argon2"
 )
 
@@ -35,11 +36,11 @@ type SecureData struct {
 }
 
 // _____ CONSTANTS _____
-const SALT_LENGTH = 256
+const KEY_LENGTH = 256
 
 // _____ HELPER FUNCTIONS _____
 func generateSalt() ([]byte, error) {
-    salt := make([]byte, SALT_LENGTH)
+    salt := make([]byte, KEY_LENGTH)
     _, err := rand.Read(salt)
     if err != nil {
         return nil, err
@@ -48,7 +49,12 @@ func generateSalt() ([]byte, error) {
 }
 
 func hashPassword(password string, salt []byte) []byte {
-    return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 256)
+    return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, KEY_LENGTH)
+}
+
+func verifyPassword(storedHashedPassword, salt []byte, password string) bool {
+    hashedPassword := argon2.IDKey([]byte(password), salt, 1, 128*1024, 4, KEY_LENGTH)
+    return subtle.ConstantTimeCompare(hashedPassword, storedHashedPassword) == 1
 }
 
 
@@ -67,6 +73,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	if (err != nil) {
 		return nil, err
 	}
+
 
 	
 
