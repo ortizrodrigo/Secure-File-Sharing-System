@@ -1,13 +1,22 @@
 package client
 
 import (
-	"github.com/google/uuid"
-	"encoding/json"
-	"crypto/dsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/subtle"
-    "golang.org/x/crypto/argon2"
+	"crypto/dsa"
+	"crypto/sha256"
+	"crypto/hmac"
+	"golang.org/x/crypto/argon2"
+
+	"fmt"
+	"log"
+	"encoding/json"
+	
+	"github.com/google/uuid"
+	"github.com/dgraph-io/badger/v3"
+    
+	
 )
 
 // _____ STRUCTS _____
@@ -37,8 +46,23 @@ type SecureData struct {
 
 // _____ CONSTANTS _____
 const KEY_LENGTH = 256
+const SALT_PURPOSE_STRING = "SALT_PURPOSE_STRING"
 
 // _____ HELPER FUNCTIONS _____
+func uuidFromBytes(key []byte, purpose string) (uuid.UUID, error) {
+	hashedKey := deriveKey(key, purpose)
+	return uuid.FromBytes(hashedKey[:16])
+}
+
+func uuidFromStrings(keyString, purpose string) (uuid.UUID, error) {
+	key, err := json.Marshal(keyString)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	hashedKey := sha256.Sum256(key)
+	return uuidFromBytes(hashedKey[:], purpose)
+}
+
 func generateSalt() ([]byte, error) {
     salt := make([]byte, KEY_LENGTH)
     _, err := rand.Read(salt)
@@ -55,6 +79,39 @@ func hashPassword(password string, salt []byte) []byte {
 func verifyPassword(storedHashedPassword, salt []byte, password string) bool {
     hashedPassword := argon2.IDKey([]byte(password), salt, 1, 128*1024, 4, KEY_LENGTH)
     return subtle.ConstantTimeCompare(hashedPassword, storedHashedPassword) == 1
+}
+
+func deriveKey(key []byte, purpose string) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(purpose))
+	return h.Sum(nil)
+}
+
+func storeData(db *badger.DB, key string, value []byte) error {
+	// Note: read-write transactions
+	return db.Update(func(txn *badger.Txn) error {
+		// Store the key-value pair
+		return txn.Set([]byte(key), value)
+	})
+}
+
+func getData(db *badger.DB, key string) ([]byte, error) {
+	var value []byte
+	// Note: read-only transactions
+	err := db.View(func(txn *badger.Txn) error {
+		// Retrieve the information stored in the database
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			return err
+		}
+		// Read the value stored in the database
+		return item.Value(func(val []byte) error {
+			// Copy value for security purposes
+			value = append([]byte{}, val...)
+			return nil
+		})
+	})
+	return value, err
 }
 
 
