@@ -30,6 +30,7 @@ type User struct {
 type UserKeys struct {
 	PrivateKey *rsa.PrivateKey
 	DSSignKey  *dsa.PrivateKey
+	RootKey    []byte
 }
 
 type Salt struct {
@@ -44,9 +45,12 @@ type SecureData struct {
 }
 
 // _____ CONSTANTS _____
-const KEY_LENGTH = 256
-const SALT_PURPOSE_STRING = "SALT_PURPOSE_STRING"
-const DB_PATH = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem"
+const symKeyLength = 32 // bytes
+const asymKeyLength = 2048 // bytes
+const signKeyLength = dsa.L1024N160
+const saltPurposeString = "SALT_PURPOSE_STRING"
+const dbPath = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem/client/dataBase"
+const kbPath = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem/client/keyBase"
 
 // _____ HELPER FUNCTIONS _____
 func uuidFromBytes(key []byte, purpose string) (uuid.UUID, error) {
@@ -63,21 +67,25 @@ func uuidFromStrings(keyString, purpose string) (uuid.UUID, error) {
 	return uuidFromBytes(hashedKey[:], purpose)
 }
 
-func generateSalt() ([]byte, error) {
-    salt := make([]byte, KEY_LENGTH)
-    _, err := rand.Read(salt)
-    if err != nil {
-        return nil, err
-    }
-    return salt, nil
+func genRandomBytes(length int) ([]byte, error) {
+	bytes := make([]byte, length)
+	_, err := rand.Read(bytes)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
+}
+
+func genSalt() ([]byte, error) {
+    return genRandomBytes(symKeyLength)
 }
 
 func hashPassword(password string, salt []byte) []byte {
-    return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, KEY_LENGTH)
+    return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, symKeyLength)
 }
 
 func verifyPassword(storedHashedPassword, salt []byte, password string) bool {
-    hashedPassword := argon2.IDKey([]byte(password), salt, 1, 128*1024, 4, KEY_LENGTH)
+    hashedPassword := argon2.IDKey([]byte(password), salt, 1, 128*1024, 4, symKeyLength)
     return subtle.ConstantTimeCompare(hashedPassword, storedHashedPassword) == 1
 }
 
@@ -85,6 +93,28 @@ func deriveKey(key []byte, purpose string) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write([]byte(purpose))
 	return h.Sum(nil)
+}
+
+func genPrivateKey() (*rsa.PrivateKey, error) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, asymKeyLength)
+	if err != nil {
+		return nil, err
+	}
+	return privateKey, nil
+}
+
+func genSignKey() (*dsa.PrivateKey, error) {
+	var params dsa.Parameters
+	if err := dsa.GenerateParameters(&params, rand.Reader, signKeyLength); err != nil {
+		return nil, err
+	}
+
+	signKey := new(dsa.PrivateKey)
+	signKey.PublicKey.Parameters = params
+	if err := dsa.GenerateKey(signKey, rand.Reader); err != nil {
+		return nil, err
+	}
+	return signKey, nil
 }
 
 func storeData(db *badger.DB, key string, value []byte) error {
@@ -114,67 +144,116 @@ func getData(db *badger.DB, key string) ([]byte, error) {
 	return value, err
 }
 
+func dbStore(key string, value []byte) error {
+	db, err := badger.Open(badger.DefaultOptions(dbPath))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return storeData(db, key, value)
+}
+
+func dbGet(key string) ([]byte, error) {
+	db, err := badger.Open(badger.DefaultOptions(dbPath))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return getData(db, key)
+}
+
+func kbStore(key string, value []byte) error {
+	db, err := badger.Open(badger.DefaultOptions(kbPath))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return storeData(db, key, value)
+}
+
+func kbGet(key string) ([]byte, error) {
+	db, err := badger.Open(badger.DefaultOptions(kbPath))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return getData(db, key)
+}
 
 // _____ MAIN FUNCTIONS _____
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
-	salt, err := generateSalt()
+	// Generate new User's salt for password hasing purposes
+	salt, err := genSalt()
 	if (err != nil) {
 		return nil, err
 	}
 
+	// Generate saltStruct to store user log in credentials
 	hashedPassword := hashPassword(password, salt)
-
 	saltStruct := Salt{username, salt, hashedPassword}
+
+	// Deterministically derive user's uuid to store log in credentials
+	saltStructUUID, err := uuidFromStrings(username, saltPurposeString)
+	if (err != nil) {
+		return nil, err
+	}
+	saltStructUUIDString := saltStructUUID.String()
+	
+	// Store user log in credentials
 	serializedSaltStruct, err := json.Marshal(&saltStruct)
 	if (err != nil) {
 		return nil, err
 	}
-
-	saltStructUUID, err := uuidFromStrings(username, SALT_PURPOSE_STRING)
-	if (err != nil) {
-		return nil, err
-	}
-
-	db, err := badger.Open(badger.DefaultOptions(DB_PATH))
+	err = dbStore(saltStructUUIDString, serializedSaltStruct)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
-	
-	saltStructUUIDString := saltStructUUID.String()
-	err = storeData(db, saltStructUUIDString, serializedSaltStruct)
+
+	// Generate user private key for asymmetric encryption purposes
+	privateKey, err := genPrivateKey()
 	if err != nil {
 		return nil, err
 	}
 	
-	return nil, nil
+	// Generate user sign key for digital signatures
+	signKey, err := genSignKey()
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate user's root key for personal encryption purposes
+	rootKey, err := genRandomBytes(symKeyLength)
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate user data struct
+	userdataptr = &User{username, privateKey, signKey, rootKey}
+	
+	return userdataptr, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
-	saltStructUUID, err := uuidFromStrings(username, SALT_PURPOSE_STRING)
+	// Deterministically derive user's uuid to store log in credentials
+	saltStructUUID, err := uuidFromStrings(username, saltPurposeString)
 	if err != nil {
 		return nil, err
 	}
 	saltStructUUIDString := saltStructUUID.String()
 
-	db, err := badger.Open(badger.DefaultOptions(DB_PATH))
+	// Retrieve user log in credentials
+	serializedSaltStruct, err := dbGet(saltStructUUIDString)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
-
-	serializedSaltStruct, err := getData(db, saltStructUUIDString)
-	if err != nil {
-		return nil, err
-	}
-
 	var saltStruct Salt
 	err = json.Unmarshal(serializedSaltStruct, &saltStruct)
 	if err != nil {
 		return nil, err
 	}
 
+	// Verify user log in credentials
 	if !verifyPassword(saltStruct.HashedPassword, saltStruct.Salt, password) {
 		return nil, errors.New("Invalid Credentials")
 	}
