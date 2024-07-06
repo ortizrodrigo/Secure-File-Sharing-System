@@ -179,6 +179,22 @@ func symDec(key, cipherText []byte) ([]byte, error) {
 	return plainText, nil
 }
 
+func asymEnc(pubKey *rsa.PublicKey, plainText []byte) ([]byte, error) {
+	cipherText, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKey, plainText, nil)
+	if err != nil {
+		return nil, err
+	}
+	return cipherText, nil
+}
+
+func asymDec(privKey *rsa.PrivateKey, cipherText []byte) ([]byte, error) {
+	plainText, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privKey, cipherText, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plainText, nil
+}
+
 // Data
 func storeData(db *badger.DB, key string, value []byte) error {
 	// Note: read-write transactions
