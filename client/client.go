@@ -7,10 +7,14 @@ import (
 	"crypto/dsa"
 	"crypto/sha256"
 	"crypto/hmac"
+	"crypto/aes"
+	"crypto/cipher"
+
 	"golang.org/x/crypto/argon2"
 
 	"encoding/json"
 	"errors"
+	"io"
 	
 	"github.com/google/uuid"
 	"github.com/dgraph-io/badger/v3"
@@ -80,6 +84,7 @@ func genSalt() ([]byte, error) {
     return genRandomBytes(symKeyLength)
 }
 
+// Hashing
 func hashPassword(password string, salt []byte) []byte {
     return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, symKeyLength)
 }
@@ -89,6 +94,7 @@ func verifyPassword(storedHashedPassword, salt []byte, password string) bool {
     return subtle.ConstantTimeCompare(hashedPassword, storedHashedPassword) == 1
 }
 
+// Keys
 func deriveKey(key []byte, purpose string) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write([]byte(purpose))
@@ -111,12 +117,69 @@ func genSignKey() (*dsa.PrivateKey, error) {
 
 	signKey := new(dsa.PrivateKey)
 	signKey.PublicKey.Parameters = params
-	if err := dsa.GenerateKey(signKey, rand.Reader); err != nil {
+	err := dsa.GenerateKey(signKey, rand.Reader)
+	if  err != nil {
 		return nil, err
 	}
 	return signKey, nil
 }
 
+// Encryption
+func symEnc(key, plainText []byte) ([]byte, error) {
+	// Deterministically drive Advanced Encryption Standard Cipher block
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use a counter mode cipher
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a nonce
+	nonce := make([]byte, aesGCM.NonceSize())
+	_, err = io.ReadFull(rand.Reader, nonce)
+	if err != nil {
+		return nil, err
+	}
+
+	// Encrypt the plainText
+	cipherText := aesGCM.Seal(nonce, nonce, plainText, nil)
+	return cipherText, nil
+}
+
+func symDec(key, cipherText []byte) ([]byte, error) {
+	// Deterministically drive Advanced Encryption Standard Cipher block
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use a counter mode cipher
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify cipherText length for decryption
+	nonceSize := aesGCM.NonceSize()
+	if len(cipherText) < nonceSize {
+		return nil, errors.New("Invalid cipherText length")
+	}
+
+	// Decrypt cipherText
+	nonce, cipherText := cipherText[:nonceSize], cipherText[nonceSize:]
+	plainText, err := aesGCM.Open(nil, nonce, cipherText, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return plainText, nil
+}
+
+// Data
 func storeData(db *badger.DB, key string, value []byte) error {
 	// Note: read-write transactions
 	return db.Update(func(txn *badger.Txn) error {
@@ -185,7 +248,7 @@ func kbGet(key string) ([]byte, error) {
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	// Generate new User's salt for password hasing purposes
 	salt, err := genSalt()
-	if (err != nil) {
+	if err != nil {
 		return nil, err
 	}
 
@@ -195,14 +258,14 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	// Deterministically derive user's uuid to store log in credentials
 	saltStructUUID, err := uuidFromStrings(username, saltPurposeString)
-	if (err != nil) {
+	if err != nil {
 		return nil, err
 	}
 	saltStructUUIDString := saltStructUUID.String()
 	
 	// Store user log in credentials
 	serializedSaltStruct, err := json.Marshal(&saltStruct)
-	if (err != nil) {
+	if err != nil {
 		return nil, err
 	}
 	err = dbStore(saltStructUUIDString, serializedSaltStruct)
