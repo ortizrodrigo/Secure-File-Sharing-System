@@ -56,6 +56,7 @@ const signKeyLength = dsa.L1024N160
 const saltPurposeString = "saltPurposeString"
 const pubKeyPurposeString = "pubKeyPurposeString"
 const verKeyPurposeString = "verKeyPurposeString"
+const userKeysPurposeString = "userKeysPurposeString"
 const userKeysSymKeyPurposeString = "userKeysSymKeyPurposeString"
 const userKeysMacKeyPurposeString = "userKeysMacKeyPurposeString"
 const dbPath = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem/client/dataBase"
@@ -236,6 +237,18 @@ func asymDecThenDeserialize(privKey *rsa.PrivateKey, cipherText []byte, data int
 	return json.Unmarshal(plainText, data)
 }
 
+// MAC
+func generateMAC(key, data []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write(data)
+	return h.Sum(nil)
+}
+
+func verifyMAC(key, data, expectedMAC []byte) bool {
+	calculatedMAC := generateMAC(key, data)
+	return hmac.Equal(calculatedMAC, expectedMAC)
+}
+
 // Data
 func storeData(db *badger.DB, key string, value []byte) error {
 	// Note: read-write transactions
@@ -414,6 +427,33 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	// Generaye symmetric and MAC keys used to securely store userKeys
 	userKeysSymKey := deriveKey(userKeysHashedPassword, userKeysSymKeyPurposeString)
 	userKeysMacKey := deriveKey(userKeysHashedPassword, userKeysMacKeyPurposeString)
+
+	// Encrypt then MAC userKeys struct
+	encUserKeysStruct, err := serializeThenSymEnc(userKeysSymKey, userKeysStruct)
+	if err != nil {
+		return nil, err
+	}
+	encUserKeysStructMAC := generateMAC(userKeysMacKey, encUserKeysStruct)
+
+	// Create and serialize userKeys SecureData struct for storing purposes
+	userKeysSecureData := SecureData{encUserKeysStruct, encUserKeysStructMAC}
+	serUserKeysSecureData, err := json.Marshal(userKeysSecureData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Deterministically derive user's uuid to store userKeys
+	userKeysUUID, err := uuidFromBytes(userKeysHashedPassword, userKeysPurposeString)
+	if err != nil {
+		return nil, err
+	}
+	userKeysUUIDString := userKeysUUID.String()
+
+	// Store userKeys
+	err = dbStore(userKeysUUIDString, serUserKeysSecureData)
+	if err != nil {
+		return nil, err
+	}
 
 	// Generate user data struct
 	userdataptr = &User{username, privKey, signKey, rootKey}
