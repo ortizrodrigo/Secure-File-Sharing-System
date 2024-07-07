@@ -9,6 +9,7 @@ import (
 	"crypto/hmac"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/x509"
 
 	"golang.org/x/crypto/argon2"
 
@@ -52,7 +53,11 @@ type SecureData struct {
 const symKeyLength = 32 // bytes
 const asymKeyLength = 2048 // bytes
 const signKeyLength = dsa.L1024N160
-const saltPurposeString = "SALT_PURPOSE_STRING"
+const saltPurposeString = "saltPurposeString"
+const pubKeyPurposeString = "pubKeyPurposeString"
+const verKeyPurposeString = "verKeyPurposeString"
+const userKeysSymKeyPurposeString = "userKeysSymKeyPurposeString"
+const userKeysMacKeyPurposeString = "userKeysMacKeyPurposeString"
 const dbPath = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem/client/dataBase"
 const kbPath = "/Users/rodrigo.ortiz/Github/SecureFileSharingSystem/client/keyBase"
 
@@ -231,9 +236,6 @@ func asymDecThenDeserialize(privKey *rsa.PrivateKey, cipherText []byte, data int
 	return json.Unmarshal(plainText, data)
 }
 
-
-
-
 // Data
 func storeData(db *badger.DB, key string, value []byte) error {
 	// Note: read-write transactions
@@ -280,22 +282,50 @@ func dbGet(key string) ([]byte, error) {
 	return getData(db, key)
 }
 
-func kbStore(key string, value []byte) error {
+func kbStore(key string, pubKey interface{}) error {
 	db, err := badger.Open(badger.DefaultOptions(kbPath))
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	return storeData(db, key, value)
+
+	var serPubKey []byte
+	switch k := pubKey.(type) {
+	case *rsa.PublicKey:
+		serPubKey, err = x509.MarshalPKIXPublicKey(k)
+		if err != nil {
+			return err
+		}
+	case *dsa.PublicKey:
+		serPubKey, err = x509.MarshalPKIXPublicKey(k)
+		if err != nil {
+			return err
+		}
+	default:
+		return errors.New("invalid key type")
+	}
+
+	return storeData(db, key, serPubKey)
 }
 
-func kbGet(key string) ([]byte, error) {
+func kbGet(key string) (interface{}, error) {
 	db, err := badger.Open(badger.DefaultOptions(kbPath))
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
-	return getData(db, key)
+
+	serPubKey, err := getData(db, key)
+	if err != nil {
+		return nil, err
+	}
+
+	pubKey, err := x509.ParsePKIXPublicKey(serPubKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return pubKey, nil
 }
 
 // _____ MAIN FUNCTIONS _____
@@ -329,7 +359,20 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	// Generate user private key for asymmetric encryption purposes
-	privateKey, err := genPrivateKey()
+	privKey, err := genPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+
+	// Deterministically derive user's uuid to store rsa public key
+	pubKeyUUID, err := uuidFromStrings(username, pubKeyPurposeString)
+	if err != nil {
+		return nil, err
+	}
+	pubKeyUUIDString := pubKeyUUID.String()
+
+	// Store rsa public key
+	err = kbStore(pubKeyUUIDString, &privKey.PublicKey)
 	if err != nil {
 		return nil, err
 	}
@@ -340,14 +383,40 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 		return nil, err
 	}
 
+	// Deterministically derive user's uuid to store dsa public key
+	verKeyUUID, err := uuidFromStrings(username, verKeyPurposeString)
+	if err != nil {
+		return nil, err
+	}
+	verKeyUUIDString := verKeyUUID.String()
+
+	// Store dsa public key
+	err = kbStore(verKeyUUIDString, &signKey.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+
 	// Generate user's root key for personal encryption purposes
 	rootKey, err := genRandomBytes(symKeyLength)
 	if err != nil {
 		return nil, err
 	}
 
+	userKeysStruct := UserKeys{privKey, signKey, rootKey}
+
+	// Generate new salt to derive a secure key
+	userKeysSalt, err := genSalt()
+	if err != nil {
+		return nil, err
+	}
+	userKeysHashedPassword := hashPassword(password, userKeysSalt)
+
+	// Generaye symmetric and MAC keys used to securely store userKeys
+	userKeysSymKey := deriveKey(userKeysHashedPassword, userKeysSymKeyPurposeString)
+	userKeysMacKey := deriveKey(userKeysHashedPassword, userKeysMacKeyPurposeString)
+
 	// Generate user data struct
-	userdataptr = &User{username, privateKey, signKey, rootKey}
+	userdataptr = &User{username, privKey, signKey, rootKey}
 	
 	return userdataptr, nil
 }
