@@ -195,6 +195,45 @@ func asymDec(privKey *rsa.PrivateKey, cipherText []byte) ([]byte, error) {
 	return plainText, nil
 }
 
+func serializeThenSymEnc(key []byte, data interface{}) ([]byte, error) {
+	serData, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	
+	return symEnc(key, serData)
+}
+
+func symDecThenDeserialize(key, cipherText []byte, data interface{}) error {
+	plainText, err := symDec(key, cipherText)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(plainText, data)
+}
+
+func serializeThenAsymEnc(pubKey *rsa.PublicKey, data interface{}) ([]byte, error) {
+	serData, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	
+	return asymEnc(pubKey, serData)
+}
+
+func asymDecThenDeserialize(privKey *rsa.PrivateKey, cipherText []byte, data interface{}) error {
+	plainText, err := asymDec(privKey, cipherText)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(plainText, data)
+}
+
+
+
+
 // Data
 func storeData(db *badger.DB, key string, value []byte) error {
 	// Note: read-write transactions
