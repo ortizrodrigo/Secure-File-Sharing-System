@@ -40,7 +40,8 @@ type UserKeys struct {
 
 type Salt struct {
 	Username string
-	Salt,
+	initSalt,
+	keysSalt,
 	HashedPassword []byte
 }
 
@@ -344,15 +345,19 @@ func kbGet(key string) (interface{}, error) {
 // _____ MAIN FUNCTIONS _____
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
-	// Generate new User's salt for password hasing purposes
-	salt, err := genSalt()
+	// Generate new User's salts for password hasing purposes
+	initSalt, err := genSalt()
+	if err != nil {
+		return nil, err
+	}
+	keysSalt, err := genSalt()
 	if err != nil {
 		return nil, err
 	}
 
 	// Generate saltStruct to store user log in credentials
-	hashedPassword := hashPassword(password, salt)
-	saltStruct := Salt{username, salt, hashedPassword}
+	hashedPassword := hashPassword(password, initSalt)
+	saltStruct := Salt{username, initSalt, keysSalt, hashedPassword}
 
 	// Deterministically derive user's uuid to store log in credentials
 	saltStructUUID, err := uuidFromStrings(username, saltPurposeString)
@@ -417,16 +422,10 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	userKeysStruct := UserKeys{privKey, signKey, rootKey}
 
-	// Generate new salt to derive a secure key
-	userKeysSalt, err := genSalt()
-	if err != nil {
-		return nil, err
-	}
-	userKeysHashedPassword := hashPassword(password, userKeysSalt)
-
 	// Generaye symmetric and MAC keys used to securely store userKeys
-	userKeysSymKey := deriveKey(userKeysHashedPassword, userKeysSymKeyPurposeString)
-	userKeysMacKey := deriveKey(userKeysHashedPassword, userKeysMacKeyPurposeString)
+	userKeysRootKey := hashPassword(password, keysSalt)
+	userKeysSymKey := deriveKey(userKeysRootKey, userKeysSymKeyPurposeString)
+	userKeysMacKey := deriveKey(userKeysRootKey, userKeysMacKeyPurposeString)
 
 	// Encrypt then MAC userKeys struct
 	encUserKeysStruct, err := serializeThenSymEnc(userKeysSymKey, userKeysStruct)
@@ -443,7 +442,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	// Deterministically derive user's uuid to store userKeys
-	userKeysUUID, err := uuidFromBytes(userKeysHashedPassword, userKeysPurposeString)
+	userKeysUUID, err := uuidFromBytes(userKeysRootKey, userKeysPurposeString)
 	if err != nil {
 		return nil, err
 	}
@@ -481,11 +480,48 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	// Verify user log in credentials
-	if !verifyPassword(saltStruct.HashedPassword, saltStruct.Salt, password) {
-		return nil, errors.New("Invalid Credentials")
+	if !verifyPassword(saltStruct.HashedPassword, saltStruct.initSalt, password) {
+		return nil, errors.New("GetUser: Invalid Credentials")
 	}
 
-	userStruct := User{username, nil, nil, nil}
+	// Generaye symmetric and MAC keys used to securely store userKeys
+	userKeysRootKey := hashPassword(password, saltStruct.keysSalt)
+	userKeysSymKey := deriveKey(userKeysRootKey, userKeysSymKeyPurposeString)
+	userKeysMacKey := deriveKey(userKeysRootKey, userKeysMacKeyPurposeString)
+
+	// Deterministically derive user's uuid to retrieve userKeys
+	userKeysUUID, err := uuidFromBytes(userKeysRootKey, userKeysPurposeString)
+	if err != nil {
+		return nil, err
+	}
+	userKeysUUIDString := userKeysUUID.String()
+
+	// Retrieve userKeys' secureData struct
+	serUserKeysSecureData, err := dbGet(userKeysUUIDString)
+	if err != nil {
+		return nil, err
+	}
+
+	// Deserialize userKeys' secureData struct
+	var userKeysSecureData SecureData
+	err = json.Unmarshal(serUserKeysSecureData, &userKeysSecureData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify userKeys for integrity
+	if !verifyMAC(userKeysMacKey, userKeysSecureData.EncContent, userKeysSecureData.Tag) {
+		return nil, errors.New("GetUset: userKeys' contents modified")
+	}
+
+	// decryt then deserialize userKeys struct
+	var userKeysStruct UserKeys
+	err = symDecThenDeserialize(userKeysSymKey, userKeysSecureData.EncContent, &userKeysStruct)
+	if err != nil {
+		return nil, err
+	}
+
+	userStruct := User{username, userKeysStruct.PrivateKey, userKeysStruct.DSSignKey, userKeysStruct.RootKey}
 
 	return &userStruct, nil
 }
